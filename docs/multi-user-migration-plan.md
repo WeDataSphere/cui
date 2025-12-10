@@ -137,8 +137,10 @@
 
 ### 3.1 目录结构设计
 
+**⭐ 用户实际目录路径**（根据服务器实际情况）：
+
 ```bash
-/home/
+/mnt/bdap/
 ├── zhangsan/                    # 用户 zhangsan 的 HOME 目录
 │   ├── .claude/                 # Claude CLI 配置和历史
 │   │   ├── config.json          # Claude CLI 配置
@@ -161,26 +163,67 @@
     └── workspace/
 ```
 
-### 3.2 文件权限要求
+### 3.2 文件权限要求（真正的权限隔离）
 
 ```bash
-# 用户 HOME 目录权限
-drwx------ (700)  /home/zhangsan/
-drwx------ (700)  /home/zhangsan/.claude/
-drwx------ (700)  /home/zhangsan/.cui/
-drwx------ (700)  /home/zhangsan/workspace/
+# ✅ 用户 HOME 目录权限（宿主是用户本人）
+drwx------ (700)  /mnt/bdap/zhangsan/         # 宿主: zhangsan:zhangsan
+drwx------ (700)  /mnt/bdap/zhangsan/.claude/ # 宿主: zhangsan:zhangsan
+drwx------ (700)  /mnt/bdap/zhangsan/.cui/    # 宿主: zhangsan:zhangsan
+drwx------ (700)  /mnt/bdap/zhangsan/workspace/ # 宿主: zhangsan:zhangsan
 
 # 配置文件权限
--rw------- (600)  /home/zhangsan/.cui/config.json
+-rw------- (600)  /mnt/bdap/zhangsan/.cui/config.json  # 宿主: zhangsan:zhangsan
 
-# 所有者
-chown cui-service:cui-service /home/zhangsan/ -R
+# ⭐ 关键：所有者是用户本人（不是 cui-service）
+chown zhangsan:zhangsan /mnt/bdap/zhangsan/ -R
+chown lisi:lisi /mnt/bdap/lisi/ -R
+# ... 每个用户的目录归属于用户本人
 ```
 
-**说明**：
-- CUI 服务以 `cui-service` 系统用户运行
-- 所有用户目录归 `cui-service` 所有
-- 通过目录隔离而非 Linux 用户隔离（简化部署）
+**⭐ 隔离机制说明**：
+
+1. **进程隔离**：
+   - CUI Server 以 `hadoop` 用户运行（systemd 服务）
+   - hadoop 用户是超级管理员，有 sudo 权限
+   - 启动 Claude CLI 时使用 `sudo -u <username>` 切换到真实用户
+   - Claude CLI 进程的 **有效用户（euid）= 真实用户**，不是 hadoop
+   - 进程只能访问自己用户有权限的文件
+
+2. **权限隔离**：
+   - 每个用户目录的宿主是**用户本人**（zhangsan:zhangsan）
+   - 其他用户无法访问（权限 700）
+   - **符合 Linux 标准安全模型**
+
+3. **实现方式**：
+   ```typescript
+   // ClaudeProcessManager 启动进程
+   spawn('sudo', ['-u', 'zhangsan', '-i', 'claude', ...args], {
+     cwd: '/mnt/bdap/zhangsan/workspace',
+     // sudo -i 会自动加载用户环境（HOME=/mnt/bdap/zhangsan）
+   });
+
+   // 进程树：
+   // hadoop (euid=hadoop) - CUI Server 主进程
+   //   └─ sudo (euid=hadoop, 请求以 zhangsan 身份运行)
+   //       └─ claude (euid=zhangsan) ✅ 真正的用户进程
+   ```
+
+4. **无需额外配置 sudoers**：
+   - hadoop 是超级管理员，已经有完整的 sudo 权限
+   - 建议确保 hadoop 配置了 `NOPASSWD`，避免服务启动时需要密码输入
+   - 如果需要配置 NOPASSWD：
+     ```bash
+     # /etc/sudoers.d/hadoop-nopasswd
+     hadoop ALL=(ALL) NOPASSWD: ALL
+     ```
+
+**优势**：
+- ✅ 真正的进程隔离（不同用户进程相互隔离）
+- ✅ 真正的权限隔离（用户只能访问自己的文件）
+- ✅ 符合 Linux 安全最佳实践
+- ✅ 审计追踪清晰（每个进程都有明确的用户身份）
+- ✅ 利用现有 Linux 用户和目录（无需重新创建）
 
 ---
 
@@ -876,7 +919,12 @@ export class ClaudeProcessManager {
   }
 
   /**
-   * 启动 Claude CLI 进程（多用户版本）
+   * 启动 Claude CLI 进程（多用户版本 - 使用 sudo 切换用户）
+   *
+   * ⭐ 关键改进：使用 sudo 以真实用户身份启动进程
+   * - 实现真正的进程隔离（进程 euid = 真实用户）
+   * - 实现真正的权限隔离（只能访问自己的文件）
+   * - 符合 Linux 安全模型
    */
   private startClaudeProcess(config: MultiUserConversationConfig): ChildProcess {
     const { userContext } = config;
@@ -898,7 +946,7 @@ export class ClaudeProcessManager {
       SHELL: '/bin/bash',
     };
 
-    const args = [
+    const claudeArgs = [
       '--cwd', userContext.workspaceDir,
       // ... 其他 Claude CLI 参数
     ];
@@ -910,40 +958,29 @@ export class ClaudeProcessManager {
       claudeHome: userContext.claudeDir,
     });
 
-    // 可选：使用 firejail 沙箱
-    const useSandbox = process.env.USE_FIREJAIL === 'true';
+    // ✅ 使用 sudo 以真实用户身份启动进程
+    // 这样进程的 euid 就是真实用户，而不是 cui-service
+    const command = 'sudo';
+    const spawnArgs = [
+      '-u', userContext.username,          // 以指定用户身份运行
+      '-i',                                 // 使用用户的登录环境
+      '--',
+      this.claudeExecutablePath,
+      ...claudeArgs
+    ];
 
-    let command: string;
-    let spawnArgs: string[];
-
-    if (useSandbox) {
-      command = 'firejail';
-      spawnArgs = [
-        '--noprofile',
-        '--private=' + userContext.homeDir,  // 私有 HOME 目录
-        '--private-tmp',                      // 私有 /tmp
-        '--noroot',                           // 禁止 root
-        '--',
-        this.claudeExecutablePath,
-        ...args
-      ];
-      this.logger.debug('Using firejail sandbox');
-    } else {
-      command = this.claudeExecutablePath;
-      spawnArgs = args;
-    }
-
+    // 注意：不需要显式设置 env，因为 sudo -i 会自动加载用户环境
     const claudeProcess = spawn(command, spawnArgs, {
-      cwd: userContext.workspaceDir,  // 工作目录
-      env: env,                        // 环境变量
+      cwd: userContext.workspaceDir,  // 工作目录（sudo 会验证权限）
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: false,
     });
 
     // 记录进程 PID
-    this.logger.debug('Claude CLI process started', {
+    this.logger.debug('Claude CLI process started with sudo', {
       username: userContext.username,
       pid: claudeProcess.pid,
+      effectiveUser: userContext.username,  // 进程有效用户
     });
 
     return claudeProcess;
@@ -1403,41 +1440,63 @@ export function rateLimitMiddleware(maxRequests: number = 100, windowMs: number 
   用户目录: 每周备份
 ```
 
-### 9.2 系统初始化脚本
+### 9.2 系统初始化脚本（以 hadoop 用户运行）
 
 ```bash
 #!/bin/bash
 # scripts/setup-server.sh
+# 以 hadoop 用户身份运行此脚本
 
 set -e
 
 echo "CUI 多用户系统初始化脚本"
 echo "================================"
 
-# 1. 创建系统用户
-echo "[1/6] 创建 CUI 服务用户..."
-if ! id cui-service &>/dev/null; then
-  sudo useradd -r -s /bin/false cui-service
-  sudo usermod -L cui-service
-  echo "✓ 用户 cui-service 创建成功"
+# 1. 验证当前用户是 hadoop
+echo "[1/5] 验证运行用户..."
+CURRENT_USER=$(whoami)
+if [ "$CURRENT_USER" != "hadoop" ]; then
+  echo "✗ 错误：请以 hadoop 用户身份运行此脚本"
+  echo "  使用: su - hadoop"
+  echo "  然后执行: bash scripts/setup-server.sh"
+  exit 1
+fi
+
+echo "✓ 当前用户: hadoop"
+
+# 验证 hadoop 有 sudo 权限
+if sudo -n true 2>/dev/null; then
+  echo "✓ hadoop 用户有 sudo 权限（无密码）"
+elif sudo -v; then
+  echo "✓ hadoop 用户有 sudo 权限（需要密码）"
+  echo "⚠️  警告：建议配置 NOPASSWD，避免服务启动时需要密码"
 else
-  echo "✓ 用户 cui-service 已存在"
+  echo "✗ 错误：hadoop 用户没有 sudo 权限"
+  exit 1
+fi
+
+# 测试 sudo 切换用户
+echo "测试 sudo 切换用户功能..."
+if sudo -u $(ls /mnt/bdap | head -1) echo "Test" &>/dev/null; then
+  echo "✓ sudo 切换用户测试成功"
+else
+  echo "✗ 错误：无法使用 sudo 切换用户"
+  exit 1
 fi
 
 # 2. 安装依赖
-echo "[2/6] 安装系统依赖..."
+echo "[2/5] 安装系统依赖..."
 sudo apt update
 sudo apt install -y \
   nodejs \
   npm \
   mysql-server \
-  firejail \
   gettext-base
 
 echo "✓ 系统依赖安装完成"
 
 # 3. 配置 MySQL
-echo "[3/6] 配置 MySQL 数据库..."
+echo "[3/5] 配置 MySQL 数据库..."
 sudo mysql -e "CREATE DATABASE IF NOT EXISTS cui_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 sudo mysql -e "CREATE USER IF NOT EXISTS 'cui'@'localhost' IDENTIFIED BY 'your-secure-password';"
 sudo mysql -e "GRANT ALL PRIVILEGES ON cui_db.* TO 'cui'@'localhost';"
@@ -1446,58 +1505,34 @@ sudo mysql -e "FLUSH PRIVILEGES;"
 echo "✓ 数据库配置完成"
 
 # 4. 初始化数据库表
-echo "[4/6] 初始化数据库表..."
+echo "[4/5] 初始化数据库表..."
 sudo mysql cui_db < scripts/init-mysql-database.sql
 
 echo "✓ 数据库表创建完成"
 
 # 5. 设置资源限制
-echo "[5/6] 配置资源限制..."
+echo "[5/5] 配置资源限制..."
 cat <<EOF | sudo tee -a /etc/security/limits.conf
-cui-service soft nproc 2000
-cui-service hard nproc 2500
-cui-service soft nofile 10000
-cui-service hard nofile 15000
+hadoop soft nproc 2000
+hadoop hard nproc 2500
+hadoop soft nofile 10000
+hadoop hard nofile 15000
 EOF
 
 echo "✓ 资源限制配置完成"
-
-# 6. 创建配置目录
-echo "[6/6] 创建配置目录..."
-sudo mkdir -p /etc/cui
-sudo chown cui-service:cui-service /etc/cui
-
-# 创建服务器配置文件
-cat <<EOF | sudo tee /etc/cui/server-config.json
-{
-  "server": {
-    "host": "0.0.0.0",
-    "port": 3000
-  },
-  "interface": {
-    "colorScheme": "system",
-    "language": "zh-CN"
-  }
-}
-EOF
-
-sudo chmod 600 /etc/cui/server-config.json
-sudo chown cui-service:cui-service /etc/cui/server-config.json
-
-echo "✓ 配置目录创建完成"
 
 echo ""
 echo "================================"
 echo "✓ CUI 系统初始化完成"
 echo ""
 echo "下一步:"
-echo "1. 编辑 /etc/cui/server-config.json 配置服务器参数"
-echo "2. 配置环境变量（LDAP、JWT_SECRET 等）"
-echo "3. 使用运维工具创建用户目录"
-echo "4. 启动 CUI 服务"
+echo "1. 配置环境变量（GATEWAY_TOKEN、数据库密码等）"
+echo "2. 验证 hadoop 用户可以执行 sudo -u zhangsan claude"
+echo "3. 确认用户目录（/mnt/bdap/<username>）已存在"
+echo "4. 以 hadoop 用户启动 CUI 服务"
 ```
 
-### 9.3 Systemd 服务配置
+### 9.3 Systemd 服务配置（以 hadoop 用户运行）
 
 ```ini
 # /etc/systemd/system/cui-server.service
@@ -1508,20 +1543,16 @@ After=network.target mysql.service
 
 [Service]
 Type=simple
-User=cui-service
-Group=cui-service
+User=hadoop
+Group=hadoop
 WorkingDirectory=/opt/cui-server
 
 # 环境变量
 Environment=NODE_ENV=production
 Environment=LOG_LEVEL=info
 
-# LDAP 配置
-Environment=LDAP_URL=ldap://ldap.company.com:389
-Environment=LDAP_BASE_DN=dc=company,dc=com
-
-# JWT 配置
-Environment=JWT_SECRET=your-secure-random-secret-here
+# ⭐ 网关认证配置
+Environment=GATEWAY_TOKEN=your-secure-static-token-from-gateway
 
 # 数据库配置
 Environment=DB_HOST=localhost
@@ -1529,9 +1560,6 @@ Environment=DB_PORT=3306
 Environment=DB_USER=cui
 Environment=DB_PASSWORD=your-secure-password
 Environment=DB_NAME=cui_db
-
-# 可选：启用 firejail 沙箱
-Environment=USE_FIREJAIL=true
 
 # 启动命令
 ExecStart=/usr/bin/node /opt/cui-server/dist/server.js
@@ -1954,33 +1982,70 @@ HTTPS_PROXY=http://proxy.company.com:8080
 which claude
 
 # 检查用户目录权限
-ls -la /home/username
+ls -la /mnt/bdap/username
 
-# 检查环境变量
-env | grep HOME
-env | grep CLAUDE_HOME
+# ⭐ 验证 sudo 配置是否正确
+sudo -u username -i which claude
+sudo -u username -i echo "Test successful"
+
+# 检查 sudoers 配置
+sudo visudo -c -f /etc/sudoers.d/cui-service
+
+# 检查用户是否存在
+id username
+getent passwd username
 
 # 查看日志
 sudo journalctl -u cui-server -f
+
+# 手动测试以用户身份启动 Claude CLI
+sudo -u username -i claude --help
 ```
 
-#### Q2: 用户无法登录
+#### Q2: 用户认证失败
 
 ```bash
-# 测试 LDAP 连接
-ldapsearch -x -H ldap://ldap.company.com:389 \
-  -D "uid=username,dc=company,dc=com" \
-  -W -b "dc=company,dc=com"
+# ⭐ 检查网关 Token 配置
+echo $GATEWAY_TOKEN
+
+# 检查 Cookie 解析
+curl -H "X-Gateway-Token: your-token" \
+     -H "Cookie: dss_user_name=zhangsan" \
+     http://localhost:3000/api/users/me
 
 # 检查数据库
 mysql -u cui -p cui_db
 SELECT * FROM users WHERE username='username';
 
 # 检查日志
-grep "authentication failed" /var/log/cui/server.log
+grep "Gateway authentication" /var/log/cui/server.log
+grep "authentication error" /var/log/cui/server.log
 ```
 
-#### Q3: 性能问题
+#### Q3: Sudo 权限问题
+
+```bash
+# 验证 hadoop 可以 sudo
+sudo -u zhangsan -i echo "Test"
+
+# 检查 hadoop 用户是否需要密码
+sudo -n true && echo "No password required" || echo "Password required"
+
+# 如果需要密码，配置 NOPASSWD
+cat <<EOF | sudo tee /etc/sudoers.d/hadoop-nopasswd
+hadoop ALL=(ALL) NOPASSWD: ALL
+EOF
+sudo chmod 440 /etc/sudoers.d/hadoop-nopasswd
+
+# 验证用户目录权限
+ls -la /mnt/bdap/zhangsan/
+stat /mnt/bdap/zhangsan/
+
+# 手动测试完整流程
+sudo -u zhangsan -i claude --version
+```
+
+#### Q4: 性能问题
 
 ```bash
 # 检查系统资源
@@ -2001,9 +2066,9 @@ mysql -u cui -p -e "SELECT * FROM mysql.slow_log ORDER BY start_time DESC LIMIT 
 
 - [Claude CLI 官方文档](https://docs.anthropic.com/claude/docs)
 - [Node.js 最佳实践](https://github.com/goldbergyoni/nodebestpractices)
-- [LDAP 认证指南](https://ldap.com/)
+- [Linux sudo 安全配置](https://www.sudo.ws/docs/man/sudoers.man/)
 - [MySQL 安全配置](https://dev.mysql.com/doc/refman/8.0/en/security.html)
-- [Firejail 文档](https://firejail.wordpress.com/)
+- [Linux 多用户安全模型](https://www.kernel.org/doc/html/latest/security/index.html)
 
 ---
 
@@ -2011,7 +2076,9 @@ mysql -u cui -p -e "SELECT * FROM mysql.slow_log ORDER BY start_time DESC LIMIT 
 
 | 版本 | 日期 | 变更说明 | 作者 |
 |------|------|---------|------|
-| 1.0 | 2025-12-10 | 初始版本 | Claude |
+| 1.0 | 2025-12-10 | 初始版本（LDAP + JWT 认证） | Claude |
+| 2.0 | 2025-12-10 | **重大更新**：认证系统从 LDAP+JWT 简化为网关认证；进程隔离改为使用 sudo 切换用户；用户目录改为 /mnt/bdap/；代码量从 500+ 行减少到 100 行；开发时间从 2-3 个月缩短到 1.5-2.5 个月 | Claude |
+| 2.1 | 2025-12-10 | **简化部署**：改为使用 hadoop 超级管理员用户启动 CUI Server，无需创建 cui-service 用户，无需单独配置 sudoers | Claude |
 
 ---
 
