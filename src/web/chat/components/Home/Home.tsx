@@ -140,7 +140,7 @@ export function Home() {
                     </svg>
                   </div>
                 </div>
-                <h1 className="text-2xl font-semibold font-sans text-foreground">知数(SDS)，您的数据开发专家！</h1>
+                <h1 className="text-2xl font-semibold font-sans text-foreground">知数DataAgent，您的智能数据开发专家！</h1>
               </div>
               
               <div className="w-full">
