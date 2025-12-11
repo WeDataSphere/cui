@@ -214,8 +214,14 @@ export function createConversationRoutes(
   // List conversations
   router.get('/', async (req: Request<Record<string, never>, { conversations: ConversationSummary[]; total: number }, Record<string, never>, ConversationListQuery> & RequestWithRequestId, res, next) => {
     const requestId = req.requestId;
-    logger.debug('List conversations request', {
+    const username = req.cookies['dss_user_name'];
+    if (!username) {
+      logger.warn('No username found in cookies', { requestId });
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    logger.info('List conversations request', {
       requestId,
+      username,
       query: req.query
     });
     
@@ -252,13 +258,15 @@ export function createConversationRoutes(
       const conversationsNotInHistory = conversationStatusManager.getConversationsNotInHistory(existingSessionIds);
 
       // Combine history conversations with active ones not in history
-      const allConversations = [...conversationsWithStatus, ...conversationsNotInHistory];
+      var allConversations = [...conversationsWithStatus, ...conversationsNotInHistory];
+      // filter with users
+      allConversations = allConversations.filter((cs: ConversationSummary) => cs.projectPath.includes(username))
 
       // Ensure session info entries exist for all conversations
       try {
         await sessionInfoService.syncMissingSessions(allConversations.map(c => c.sessionId));
       } catch (syncError) {
-        logger.debug('Failed to sync session info', {
+        logger.info('Failed to sync session info', {
           requestId,
           error: syncError instanceof Error ? syncError.message : String(syncError)
         });
@@ -275,7 +283,7 @@ export function createConversationRoutes(
       
       res.json({
         conversations: allConversations,
-        total: result.total + conversationsNotInHistory.length // Update total to include conversations not in history
+        total: allConversations.length // Update total to include conversations not in history
       });
     } catch (error) {
       logger.debug('List conversations failed', {

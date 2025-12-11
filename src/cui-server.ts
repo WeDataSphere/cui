@@ -13,6 +13,7 @@ import { ClaudeHistoryReader } from './services/claude-history-reader.js';
 import { PermissionTracker } from './services/permission-tracker.js';
 import { MCPConfigGenerator } from './services/mcp-config-generator.js';
 import { FileSystemService } from './services/file-system-service.js';
+import { ProjectService } from './services/project-service.js';
 import { ConfigService } from './services/config-service.js';
 import { SessionInfoService } from './services/session-info-service.js';
 import { ConversationStatusManager } from './services/conversation-status-manager.js';
@@ -60,6 +61,7 @@ export class CUIServer {
   private permissionTracker: PermissionTracker;
   private mcpConfigGenerator: MCPConfigGenerator;
   private fileSystemService: FileSystemService;
+  private projectService: ProjectService;
   private configService: ConfigService;
   private sessionInfoService: SessionInfoService;
   private conversationStatusManager: ConversationStatusManager;
@@ -103,6 +105,7 @@ export class CUIServer {
     this.statusTracker = this.conversationStatusManager; // Use the same instance for backward compatibility
     this.toolMetricsService = new ToolMetricsService();
     this.fileSystemService = new FileSystemService();
+    this.projectService = new ProjectService();
     this.processManager = new ClaudeProcessManager(this.historyReader, this.statusTracker, undefined, undefined, this.toolMetricsService, this.sessionInfoService, this.fileSystemService);
     this.streamManager = new StreamManager();
     this.permissionTracker = new PermissionTracker();
@@ -486,7 +489,7 @@ export class CUIServer {
     this.app.use('/api/filesystem', createFileSystemRoutes(this.fileSystemService));
     this.app.use('/api/logs', createLogRoutes());
     this.app.use('/api/stream', createStreamingRoutes(this.streamManager));
-    this.app.use('/api/working-directories', createWorkingDirectoriesRoutes(this.workingDirectoriesService));
+    this.app.use('/api/working-directories', createWorkingDirectoriesRoutes(this.workingDirectoriesService, this.projectService));
     this.app.use('/api/config', createConfigRoutes(this.configService));
     this.app.use('/api/gemini', createGeminiRoutes(geminiService));
     

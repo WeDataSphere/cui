@@ -120,7 +120,7 @@ export function Home() {
 
   return (
     <div className="flex flex-col h-screen w-full bg-background">
-      <Header />
+      {/* <Header /> */}
 
       <main className="relative flex flex-1 w-full h-full overflow-hidden transition-all duration-[250ms] z-[1]">
         <div className="flex flex-col h-full w-full">
@@ -140,7 +140,7 @@ export function Home() {
                     </svg>
                   </div>
                 </div>
-                <h1 className="text-2xl font-semibold font-sans text-foreground">What is the next task?</h1>
+                <h1 className="text-2xl font-semibold font-sans text-foreground">知数(SDS)，您的数据开发专家！</h1>
               </div>
               
               <div className="w-full">
