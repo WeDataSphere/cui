@@ -1164,7 +1164,31 @@ export class UserService {
 
 CUI 不再提供登录相关 API，用户在网关层完成登录。
 
-### 7.2 用户相关
+### 7.4 SSE 接口认证（补充）
+
+SSE (Server-Sent Events) 接口（例如 `/api/stream`）用于实时推送信息。由于浏览器原生的 `EventSource` 不支持自定义 Header，SSE 连接的认证依赖于 **网关注入机制** 和 **Cookie**。
+
+**请求流转与认证细节:**
+
+1.  **前端发起**: 用户浏览器执行 `new EventSource('/api/stream')`。
+    *   ✅ **Cookie**: 浏览器自动携带 `dss_user_name` Cookie。
+    *   ❌ **Header**: 浏览器**不发送** `X-Gateway-Token`。
+2.  **网关处理**: 企业网关拦截请求。
+    *   网关验证 Cookie 有效性。
+    *   ✅ **注入 Token**: 网关在转发给 CUI Server 之前，**自动向 Request Header 中插入 `X-Gateway-Token`**。
+3.  **后端验证**: CUI Server 接收请求。
+    *   `gatewayAuthMiddleware` 同时读取到 Token (来自网关) 和 Cookie (来自浏览器)，认证通过。
+
+**结论**: 前端无需（也无法）处理 `X-Gateway-Token`，这是网关层的职责。
+
+**注意事项:**
+
+*   确保 `dss_user_name` Cookie 在 CUI Server 的域名下是可用的。
+*   本地开发调试时，因为没有真实网关，可能需要使用 Postman 或修改代码模拟注入该 Token。
+
+---
+
+## 8. 安全加固措施
 
 ```typescript
 // GET /api/users/me
@@ -1353,65 +1377,69 @@ export class AuditLogger {
 }
 ```
 
-### 8.4 速率限制
+### 8.5 进程生命周期管理增强（补充）
+
+针对多用户并发场景下的资源瓶颈，必须在应用层实现精细的进程管理，防止僵尸进程耗尽服务器资源。
 
 ```typescript
-// src/middleware/rate-limit.ts
+// src/services/process-lifecycle-manager.ts (新增)
 
-import { Request, Response, NextFunction } from 'express';
-import { createLogger } from '@/services/logger.js';
+export class ProcessLifecycleManager {
+  // ...
 
-const logger = createLogger('RateLimit');
+  /**
+   * 1. 空闲超时自动回收 (Idle GC)
+   * 策略：
+   * - 维护每个会话的 lastActivityTime
+   * - 定时器（如每分钟）扫描所有会话
+   * - 超过 30 分钟无交互 -> 自动 kill 进程
+   * - 释放内存和文件句柄
+   */
+  private checkIdleProcesses() {
+    const idleThreshold = 30 * 60 * 1000; // 30分钟
+    // ...遍历 processes ...
+    // if (now - lastActivity > idleThreshold) this.killProcess(sessionId);
+  }
 
-interface RateLimitStore {
-  count: number;
-  resetTime: number;
-}
+  /**
+   * 2. 连接断开联动
+   * 策略：
+   * - 监听 SSE 连接的 'close' 事件（前端关闭浏览器）
+   * - 立即标记该会话为 "detached"
+   * - 启动短时倒计时（如 5 分钟），如果用户未重连，则回收进程
+   */
+  public handleClientDisconnect(sessionId: string) {
+    // startShortTermTimer(sessionId);
+  }
 
-const store = new Map<string, RateLimitStore>();
-
-/**
- * 速率限制中间件
- * @param maxRequests 时间窗口内最大请求数
- * @param windowMs 时间窗口（毫秒）
- */
-export function rateLimitMiddleware(maxRequests: number = 100, windowMs: number = 60000) {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    const username = req.user?.username || req.ip || 'anonymous';
-    const now = Date.now();
-
-    let record = store.get(username);
-
-    // 清理过期记录
-    if (record && now >= record.resetTime) {
-      store.delete(username);
-      record = undefined;
+  /**
+   * 3. LRU 进程淘汰策略
+   * 策略：
+   * - 设置应用级最大并发数（如 MAX_CONCURRENT_PROCESSES = 100）
+   * - 当新会话请求创建且当前进程数 >= MAX 时
+   * - 强制回收 "最久未活动" (Least Recently Used) 的进程
+   * - 确保活跃用户不受影响，优先淘汰挂机用户
+   */
+  public async ensureCapacity(): Promise<void> {
+    if (this.processCount >= this.MAX_CONCURRENT) {
+      const victim = this.findLRUVictim();
+      await this.killProcess(victim);
     }
-
-    if (!record) {
-      record = {
-        count: 1,
-        resetTime: now + windowMs,
-      };
-      store.set(username, record);
-      next();
-      return;
-    }
-
-    if (record.count >= maxRequests) {
-      logger.warn('Rate limit exceeded', { username, count: record.count });
-      res.status(429).json({
-        error: 'Too many requests',
-        retryAfter: Math.ceil((record.resetTime - now) / 1000),
-      });
-      return;
-    }
-
-    record.count++;
-    next();
-  };
+  }
 }
 ```
+
+**前端配合要求**：
+- **心跳机制 (Heartbeat)**: 前端需每分钟发送一次心跳请求，防止用户在阅读长内容时被误判为空闲。
+- **自动恢复 (Auto-Resume)**: 如果后端因 LRU 回收了进程，前端再次发送消息时，后端应尝试静默重启进程并恢复上下文。
+
+### 8.6 用户级日志分流（补充）
+
+为了方便排查特定用户的问题，避免所有日志混杂在系统日志中：
+
+- **重定向策略**: 将 Claude CLI 的 `stdout` 和 `stderr` 重定向到用户个人目录。
+- **路径**: `/home/<user>/.cui/logs/claude-cli-<date>.log`
+- **实现**: 在 `spawn` 时配置流的管道，或者使用 `logger` 将特定 Tag 的日志写入独立文件。
 
 ---
 
@@ -1770,11 +1798,21 @@ server {
 - ✅ 未认证请求返回 401
 - ✅ 用户只能访问自己的资源
 
-### 10.4 Phase 4: 安全加固（1-2 周）
+### 10.4 Phase 4: 安全加固与资源管理（2-3 周）
 
-**目标**：提升系统安全性
+**目标**：提升系统安全性与稳定性
 
 **任务清单**：
+
+- [ ] 进程生命周期管理 (新增)
+  - [ ] 实现空闲超时回收 (Idle GC) 逻辑
+  - [ ] 实现 SSE 连接断开检测与快速回收
+  - [ ] 实现 LRU 进程淘汰策略
+  - [ ] 前端添加心跳 (Heartbeat) 机制
+
+- [ ] 日志隔离 (新增)
+  - [ ] 改造 Logger 支持多目标输出
+  - [ ] 实现 Claude CLI 日志重定向到用户目录
 
 - [ ] 文件系统安全
   - [ ] 验证目录权限脚本
@@ -1797,10 +1835,13 @@ server {
   - [ ] 测试限流效果
 
 **验收标准**：
+- ✅ 空闲进程在 30 分钟后自动被杀死
+- ✅ 达到最大并发数时，旧进程被正确回收
+- ✅ 前端断开连接后，后端资源能及时释放
+- ✅ 每个用户的日志写入各自的目录
 - ✅ 文件权限正确设置
 - ✅ 关键操作有审计日志
 - ✅ API 有速率限制
-- ✅ 可选的沙箱功能正常
 
 ### 10.5 Phase 5: 前端改造和测试（1-2 周）
 
