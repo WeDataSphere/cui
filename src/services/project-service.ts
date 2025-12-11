@@ -75,8 +75,8 @@ export class ProjectService {
     this.projectDirectoryCache.clear();
   }
 
-  getProjectPath(projectName: string): string {
-    const projectDir = path.join(process.env.HOME, '.claude', 'projects', projectName);
+  getUserProjectPath(projectName: string): string {
+    const projectDir = path.join('/mnt/bdap', projectName);
     return projectDir
   }
 

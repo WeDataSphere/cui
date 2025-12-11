@@ -23,7 +23,7 @@ export function createWorkingDirectoriesRoutes(
 
     try {
       let result = await workingDirectoriesService.getWorkingDirectories();
-      const user_claude_project_path = projectService.getProjectPath(username);
+      const user_claude_project_path = projectService.getUserProjectPath(username);
       const user_project = result.directories.find((w: WorkingDirectory) => w.path.includes(user_claude_project_path));
 
       if (user_project) {
