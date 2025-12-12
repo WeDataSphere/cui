@@ -14,16 +14,20 @@ export function createWorkingDirectoriesRoutes(
   // Get all working directories with smart suffixes
   router.get('/', async (req: Request<Record<string, never>, WorkingDirectoriesResponse>, res, next) => {
     const requestId = req.headers['x-request-id'] || 'unknown';
-    const username = req.cookies['dss_user_name'];
+    let username = req.cookies?.dss_user_name;
+    let projectName = req.cookies?.project_name;
     if (!username) {
       logger.warn('No username found in cookies', { requestId });
-      return res.status(401).json({ error: 'Authentication required' });
+      return res.status(401).json({ directories: [], totalCount: 0, error: 'Authentication required' });
     }
-    logger.info('Getting working directories', { requestId, username });
+    if (!projectName) {
+      projectName = username;
+    }
+    logger.info('Getting working directories', { requestId, username, projectName });
 
     try {
       let result = await workingDirectoriesService.getWorkingDirectories();
-      const user_claude_project_path = projectService.getUserProjectPath(username);
+      const user_claude_project_path = projectService.getProjectPath(projectName);
       const user_project = result.directories.find((w: WorkingDirectory) => w.path.includes(user_claude_project_path));
 
       if (user_project) {
@@ -32,7 +36,7 @@ export function createWorkingDirectoriesRoutes(
           totalCount: 1
         }
       } else {
-        logger.warn(`User ${username} has no working directory, I will create a Claude project ${user_claude_project_path} for him!`, { requestId });
+        logger.warn(`User ${username} has no working directory, I will create a Claude project in path '${user_claude_project_path}' for him!`, { requestId });
         const project = await projectService.addProjectManually(user_claude_project_path);
         result =  {
           directories: [{

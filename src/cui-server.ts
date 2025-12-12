@@ -1,4 +1,5 @@
-import express, { Express } from 'express';
+import express, { Express, Request } from 'express';
+import { parse } from 'cookie';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -431,10 +432,28 @@ export class CUIServer {
 
   private setupMiddleware(): void {
     this.app.use(createCorsMiddleware());
-    this.app.use(express.json({ limit: '10mb' }));
+    this.app.use(express.json({ limit: '20mb' }));
     
     // Static file serving
     const isDev = process.env.NODE_ENV === 'development';
+    // 自定义 cookie 解析中间件
+    this.app.use((req: Request, res, next) => {
+      const cookieHeader = req.headers.cookie;
+      if (cookieHeader) {
+        try {
+          (req as any).cookies = parse(cookieHeader);
+        } catch (error) {
+          (req as any).cookies = {};
+        }
+      } else {
+        (req as any).cookies = {};
+      }
+      if (isDev && !(req as any).cookies.dss_user_name) {
+        this.logger.info('set dss_user_name=enjoyyin, since the NODE_ENV=development.');
+        (req as any).cookies.dss_user_name = "enjoyyin";  // 测试环境的默认用户名
+      }
+      next();
+    });
     if (!isDev) {
       // In production/test, serve built static files
       // In production, __dirname will be /path/to/node_modules/cui-server/dist
@@ -484,7 +503,8 @@ export class CUIServer {
       this.statusTracker,
       this.sessionInfoService,
       this.conversationStatusManager,
-      this.toolMetricsService
+      this.toolMetricsService,
+      this.projectService
     ));
     this.app.use('/api/filesystem', createFileSystemRoutes(this.fileSystemService));
     this.app.use('/api/logs', createLogRoutes());

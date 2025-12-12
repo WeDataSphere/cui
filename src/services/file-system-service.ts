@@ -219,12 +219,24 @@ export class FileSystemService {
       }
       
       // Check for invalid characters
-      if (/[<>:|?*]/.test(segment)) {
-        this.logger.warn('Invalid characters detected in path', { 
-          requestedPath, 
-          segment 
-        });
-        throw new CUIError('INVALID_PATH', 'Path contains invalid characters', 400);
+      // On Windows, allow ':' for drive letters (e.g., 'C:')
+      const invalidCharsPattern = process.platform === 'win32'
+        ? /[<>\\|?*]/
+        : /[<>:|?*]/;
+
+      if (invalidCharsPattern.test(segment)) {
+        // Special case: allow single ':' at position 1 for Windows drive letters
+        const isValidWindowsDrive = process.platform === 'win32' &&
+          segment.length === 2 &&
+          /^[A-Za-z]:$/.test(segment);
+
+        if (!isValidWindowsDrive) {
+          this.logger.warn('Invalid characters detected in path', {
+            requestedPath,
+            segment
+          });
+          throw new CUIError('INVALID_PATH', 'Path contains invalid characters', 400);
+        }
       }
     }
     

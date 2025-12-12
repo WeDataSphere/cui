@@ -311,7 +311,7 @@ export const Composer = forwardRef<ComposerRef, ComposerProps>(function Composer
   getMostRecentWorkingDirectory,
   model = 'default',
   onModelChange,
-  availableModels = ['default', 'opus', 'sonnet'],
+  availableModels = ['default'], //, 'opus', 'sonnet'],
   permissionRequest,
   onPermissionDecision,
   onStop,
@@ -410,7 +410,10 @@ export const Composer = forwardRef<ComposerRef, ComposerProps>(function Composer
   // Auto-select most recent directory on mount (for Home usage)
   useEffect(() => {
     if (showDirectorySelector && (!workingDirectory || selectedDirectory === 'Select directory') && Object.keys(recentDirectories).length > 0 && getMostRecentWorkingDirectory) {
-      const mostRecent = getMostRecentWorkingDirectory();
+      let mostRecent = getMostRecentWorkingDirectory();
+      if (!mostRecent) {
+        mostRecent = Object.keys(recentDirectories)[0]
+      }
       if (mostRecent) {
         setSelectedDirectory(mostRecent);
         onDirectoryChange?.(mostRecent);

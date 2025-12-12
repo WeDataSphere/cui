@@ -312,8 +312,14 @@ export function ConversationView() {
             workingDirectory={conversationSummary?.projectPath}
             onFetchFileSystem={async (directory) => {
               try {
+                const finalPath = directory || currentWorkingDirectory;
+                console.log('Fetching file system for path:', {
+                  directory,
+                  currentWorkingDirectory,
+                  finalPath
+                });
                 const response = await api.listDirectory({
-                  path: directory || currentWorkingDirectory,
+                  path: finalPath,
                   recursive: true,
                   respectGitignore: true,
                 });

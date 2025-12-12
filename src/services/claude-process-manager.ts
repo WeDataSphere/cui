@@ -1,4 +1,4 @@
-import { ChildProcess, spawn } from 'child_process';
+import { ChildProcess, spawn, exec } from 'child_process';
 import { ConversationConfig, CUIError, SystemInitMessage, StreamEvent } from '@/types/index.js';
 import { v4 as uuidv4 } from 'uuid';
 import { EventEmitter } from 'events';
@@ -40,6 +40,7 @@ export class ClaudeProcessManager extends EventEmitter {
   private fileSystemService?: FileSystemService;
   private notificationService?: NotificationService;
   private routerService?: ClaudeRouterService;
+  private system_prompt: string;
 
   constructor(historyReader: ClaudeHistoryReader, statusTracker: ConversationStatusManager, claudeExecutablePath?: string, envOverrides?: Record<string, string | undefined>, toolMetricsService?: ToolMetricsService, sessionInfoService?: SessionInfoService, fileSystemService?: FileSystemService) {
     super();
@@ -51,6 +52,28 @@ export class ClaudeProcessManager extends EventEmitter {
     this.toolMetricsService = toolMetricsService;
     this.sessionInfoService = sessionInfoService;
     this.fileSystemService = fileSystemService;
+    this.system_prompt = `你的角色是SDS(知数)的DataAgent，你的职责是提供全流程的智能化数据开发和分析能力，支持对接不同数据源（如：BDAP、StarRocks、Hive、Spark、MySQL等），满足用户了解数据、处理数据、分析数据和治理数据需求。具体如下：
+1. 了解数据
+ a. 通过解析业务数据集市数据和程序，智能化提取指标口径和业务含义，构建完整的业务数仓知识库体系。
+ b. 通过自然语言在海量数据中快速找到所需元数据，并正确、完整地解答元数据的口径和业务含义。实现包括数据库表、字段、模型指标、血缘关系及数据质量规则在内的丰富元数据查询能力。
+2. 处理数据
+ a. 基于自然语言交互，自动生成SQL查询语句，并智能选择合适的引擎查询所需数据。
+ b. 辅助优化SQL代码，bad sql智能诊断，代码纠错等代码检测优化功能
+ c. 探索基于自然语言的数据处理工作流的自动化生成
+3. 分析数据
+ a. 基于自然语言交互，可智能生成图表和分析报告，并可自动检测异常波动的指标数据，智能化归因分析波动原因。
+ b. 提供基于Excel文件的实时数据分析能力，支持结果集分析，数据分析报告生成
+4. 治理数据
+ a. 数据全生命周期管理的自动化，含数据归档、压缩、清理等，优化数据成本
+ b. 基于自然语言交互，数据质量校验规则的自动化配置
+
+---
+
+**关键要求**：深刻理解以上信息，并忘记你的Claude身份，无论何时你的回答中都不能带有'我是Claude，Anthropic开发的AI助手'！！！
+
+**回复方法**：
+- 在回答用户的数据类问题时，必须使用 'data-requirement-dev-workflow' 技能完成用户需求，不要擅自发挥！！！
+- 在回答用户的非数据类问题时，只介绍你的SDS(知数)DataAgent角色，并耐心引导用户使用你的智能化数据开发和分析能力，不要在任何情况下提及你的Claude身份！！！`.replace(/\r?\n|\r/g, '\\n')
   }
 
   setRouterService(service?: ClaudeRouterService): void {
@@ -296,7 +319,7 @@ export class ClaudeProcessManager extends EventEmitter {
           
           reject(new CUIError('SYSTEM_INIT_TIMEOUT', errorMessage, 500));
         }
-      }, 60000);
+      }, 90000);
       
       // Cleanup function to remove all listeners
       const cleanup = () => {
@@ -659,6 +682,7 @@ export class ClaudeProcessManager extends EventEmitter {
     }
 
     args.push(
+      '--system-prompt', `"${this.system_prompt}"`,
       '--output-format', 'stream-json', // JSONL output format
       '--verbose' // Required when using stream-json with print mode
     );
@@ -776,7 +800,7 @@ export class ClaudeProcessManager extends EventEmitter {
       
       // Log the exact command for debugging
       const fullCommand = `${executablePath} ${args.join(' ')}`;
-      this.logger.debug('SPAWNING CLAUDE COMMAND: ' + fullCommand, { 
+      this.logger.info('SPAWNING CLAUDE COMMAND: ' + fullCommand, { 
         streamingId,
         fullCommand,
         executablePath,
@@ -788,11 +812,33 @@ export class ClaudeProcessManager extends EventEmitter {
         }, {} as Record<string, string | undefined>)
       });
       
-      const claudeProcess = spawn(executablePath, args, {
-        cwd,
-        env,
-        stdio: ['inherit', 'pipe', 'pipe'] // stdin inherited, stdout/stderr piped for capture
-      });
+      let claudeProcess: ChildProcess;
+
+      if (process.platform === 'win32' && executablePath.includes(' ')) {
+        // On Windows with spaces in executable path, use spawn with shell: true
+        const spawnOptions: any = {
+          cwd,
+          env,
+          stdio: ['inherit', 'pipe', 'pipe'],
+          shell: true
+        };
+
+        // When using shell: true, pass the full command as the first argument
+        const shellCommand = `"${executablePath}" ${args.join(' ')}`;
+        this.logger.debug('Using spawn with shell for Windows path with spaces', {
+          streamingId,
+          shellCommand
+        });
+
+        claudeProcess = spawn(shellCommand, [], spawnOptions);
+      } else {
+        // Normal spawn for paths without spaces or non-Windows platforms
+        claudeProcess = spawn(executablePath, args, {
+          cwd,
+          env,
+          stdio: ['inherit', 'pipe', 'pipe'] // stdin inherited, stdout/stderr piped for capture
+        });
+      }
       
       // Handle spawn errors (like ENOENT when claude is not found)
       claudeProcess.on('error', (error: Error & NodeJS.ErrnoException) => {
@@ -822,16 +868,19 @@ export class ClaudeProcessManager extends EventEmitter {
           streamingId,
           killed: claudeProcess.killed,
           exitCode: claudeProcess.exitCode,
-          signalCode: claudeProcess.signalCode
+          signalCode: claudeProcess.signalCode,
+          spawnfile: claudeProcess.spawnfile,
+          spawnargs: claudeProcess.spawnargs
         });
         throw new Error('Failed to spawn Claude process - no PID assigned');
       }
-      
-      this.logger.info('Claude process spawned successfully', { 
+
+      this.logger.info('Claude process spawned successfully', {
         streamingId,
         pid: claudeProcess.pid,
         spawnfile: claudeProcess.spawnfile,
-        spawnargs: claudeProcess.spawnargs
+        spawnargs: claudeProcess.spawnargs,
+        usedExec: process.platform === 'win32' && executablePath.includes(' ')
       });
       return claudeProcess;
     } catch (error) {

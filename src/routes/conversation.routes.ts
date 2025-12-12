@@ -20,6 +20,7 @@ import { SessionInfoService } from '@/services/session-info-service.js';
 import { ConversationStatusManager } from '@/services/conversation-status-manager.js';
 import { createLogger } from '@/services/logger.js';
 import { ToolMetricsService } from '@/services/ToolMetricsService.js';
+import { ProjectService } from '@/services/project-service';
 
 export function createConversationRoutes(
   processManager: ClaudeProcessManager,
@@ -27,7 +28,8 @@ export function createConversationRoutes(
   statusTracker: ConversationStatusManager,
   sessionInfoService: SessionInfoService,
   conversationStatusManager: ConversationStatusManager,
-  toolMetricsService: ToolMetricsService
+  toolMetricsService: ToolMetricsService,
+  projectService: ProjectService
 ): Router {
   const router = Router();
   const logger = createLogger('ConversationRoutes');
@@ -214,18 +216,24 @@ export function createConversationRoutes(
   // List conversations
   router.get('/', async (req: Request<Record<string, never>, { conversations: ConversationSummary[]; total: number }, Record<string, never>, ConversationListQuery> & RequestWithRequestId, res, next) => {
     const requestId = req.requestId;
-    const username = req.cookies['dss_user_name'];
+    let username = req.cookies?.dss_user_name;
+    let projectName = req.cookies?.project_name;
     if (!username) {
       logger.warn('No username found in cookies', { requestId });
       return res.status(401).json({ error: 'Authentication required' });
     }
+    if (!projectName) {
+      projectName = username;
+    }
     logger.info('List conversations request', {
       requestId,
       username,
+      projectName,
       query: req.query
     });
     
     try {
+      const projectPath = projectService.getProjectPath(projectName);
       const result = await historyReader.listConversations(req.query);
       
       // Update status for each conversation based on active streams
@@ -260,7 +268,7 @@ export function createConversationRoutes(
       // Combine history conversations with active ones not in history
       var allConversations = [...conversationsWithStatus, ...conversationsNotInHistory];
       // filter with users
-      allConversations = allConversations.filter((cs: ConversationSummary) => cs.projectPath.includes(username))
+      allConversations = allConversations.filter((cs: ConversationSummary) => cs.projectPath.includes(projectPath))
 
       // Ensure session info entries exist for all conversations
       try {

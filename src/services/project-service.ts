@@ -75,14 +75,19 @@ export class ProjectService {
     this.projectDirectoryCache.clear();
   }
 
-  getUserProjectPath(projectName: string): string {
-    const projectDir = path.join('/mnt/bdap', projectName);
-    return projectDir
+  getProjectPath(projectName: string): string {
+    const isDev = process.env.NODE_ENV === 'development';
+    let parentDir = '/mnt/bdap';
+    if (isDev) {
+      parentDir = process.env.HOME || process.env.USERPROFILE || '';
+    }
+    const projectDir = path.join(parentDir, projectName);
+    return path.resolve(projectDir);
   }
 
   // Load project configuration file
   async loadProjectConfig(): Promise<ProjectConfigMap> {
-    const configPath = path.join(process.env.HOME, '.claude', 'project-config.json');
+    const configPath = path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude', 'project-config.json');
     try {
       const configData = await fs.readFile(configPath, 'utf8');
       return JSON.parse(configData);
@@ -94,7 +99,7 @@ export class ProjectService {
 
   // Save project configuration file
   async saveProjectConfig(config: ProjectConfigMap) {
-    const claudeDir = path.join(process.env.HOME, '.claude');
+    const claudeDir = path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude');
     const configPath = path.join(claudeDir, 'project-config.json');
     
     // Ensure the .claude directory exists
@@ -128,11 +133,12 @@ export class ProjectService {
       // Fall back to path-based naming if package.json doesn't exist or can't be read
     }
     
-    // If it starts with /, it's an absolute path
-    if (projectPath.startsWith('/')) {
-      const parts = projectPath.split('/').filter(Boolean);
-      // Return only the last folder name
-      return parts[parts.length - 1] || projectPath;
+    // Handle absolute paths (Unix, Windows, UNC)
+    if (path.isAbsolute(projectPath)) {
+      // For absolute paths, return the last directory name
+      const baseName = path.basename(projectPath);
+      // If basename is empty (e.g., root directory), use the full path
+      return baseName || projectPath;
     }
     
     return projectPath;
@@ -145,8 +151,8 @@ export class ProjectService {
       return this.projectDirectoryCache.get(projectName);
     }
     
-    
-    const projectDir = path.join(process.env.HOME, '.claude', 'projects', projectName);
+
+    const projectDir = path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude', 'projects', projectName);
     const cwdCounts = new Map();
     let latestTimestamp = 0;
     let latestCwd = null;
@@ -250,7 +256,7 @@ export class ProjectService {
   }
 
   async getProjects() {
-    const claudeDir = path.join(process.env.HOME, '.claude', 'projects');
+    const claudeDir = path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude', 'projects');
     const config = await this.loadProjectConfig();
     const projects = [];
     const existingProjects = new Set();
@@ -346,7 +352,7 @@ export class ProjectService {
 
   // Delete an empty project
   async deleteProject(projectName: string) {
-    const projectDir = path.join(process.env.HOME, '.claude', 'projects', projectName);
+    const projectDir = path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude', 'projects', projectName);
     
     try {
       // Remove the project directory
@@ -381,10 +387,17 @@ export class ProjectService {
     
     // Check if project already exists in config
     const config = await this.loadProjectConfig();
-    const projectDir = path.join(process.env.HOME, '.claude', 'projects', projectName);
+    const projectDir = path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude', 'projects', projectName);
 
     if (config[projectName]) {
-      throw new Error(`Project already configured for path: ${absolutePath}`);
+      this.logger.warn(`Project already configured for path: ${absolutePath}, ignore project addition operation.`);
+      return {
+        name: projectName,
+        path: absolutePath,
+        fullPath: absolutePath,
+        displayName: displayName || await this.generateDisplayName(projectName, absolutePath),
+        isManuallyAdded: false
+      }
     }
 
     // Allow adding projects even if the directory exists - this enables tracking
@@ -408,9 +421,7 @@ export class ProjectService {
       path: absolutePath,
       fullPath: absolutePath,
       displayName: displayName || await this.generateDisplayName(projectName, absolutePath),
-      isManuallyAdded: true,
-      sessions: [],
-      cursorSessions: []
+      isManuallyAdded: true
     };
   }
 

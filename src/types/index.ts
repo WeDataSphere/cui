@@ -294,6 +294,7 @@ export interface WorkingDirectory {
 export interface WorkingDirectoriesResponse {
   directories: WorkingDirectory[];
   totalCount: number;
+  error?: string;
 }
 
 // Commands API types

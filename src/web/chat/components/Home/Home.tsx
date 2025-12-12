@@ -149,7 +149,7 @@ export function Home() {
                   workingDirectory={recentWorkingDirectory}
                   onSubmit={handleComposerSubmit}
                   isLoading={isSubmitting}
-                  placeholder="Describe your task"
+                  placeholder="请输入您的问题，Ctrl+Enter 提交..."
                   showDirectorySelector={true}
                   showModelSelector={true}
                   enableFileAutocomplete={true}
