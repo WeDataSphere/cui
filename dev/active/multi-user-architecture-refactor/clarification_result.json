@@ -1,0 +1,235 @@
+{
+  "requirementType": "REFACTOR",
+  "clarificationRounds": 2,
+  "clarificationSummary": {
+    "rootCause": "开源项目改造，从单用户模式升级到企业多用户模式，满足内部多人协作使用需求",
+    "keyInsights": [
+      "混合身份模型：用户具有应用层、AD认证、Linux系统三重身份",
+      "中等规模并发：2000用户总数，预计200-500同时在线",
+      "完全数据隔离：每用户独立配置、会话、workspace，无协作需求",
+      "按需资源管理：空闲5分钟回收进程，依赖前端心跳保活",
+      "管理员预配置：用户生命周期由管理员管理，无自动化注册需求"
+    ],
+    "architectureDecisions": [
+      "sudo全局权限方案：接受安全风险，信任服务代码",
+      "冷启动策略：用户可接受首次请求的进程启动延迟",
+      "无历史数据迁移：全新启动，无遗留数据处理"
+    ]
+  },
+  "projectContext": {
+    "projectType": "开源项目改造",
+    "techStack": ["Node.js", "TypeScript", "Express", "React"],
+    "existingModules": [
+      "ClaudeProcessManager（进程管理）",
+      "ConversationStatusManager（会话管理）",
+      "PermissionTracker（权限跟踪）",
+      "authMiddleware（认证中间件）"
+    ],
+    "deploymentModel": "企业内部部署"
+  },
+  "refactorDetails": {
+    "refactorName": "多用户架构改造",
+    "refactorType": "架构升级",
+    "currentArchitecture": {
+      "description": "单用户共享模式",
+      "limitations": [
+        "所有用户共享一个Claude进程",
+        "单一会话，无并发支持",
+        "无用户数据隔离",
+        "无权限控制"
+      ]
+    },
+    "targetArchitecture": {
+      "description": "多用户隔离模式",
+      "keyFeatures": [
+        "每用户独立Claude进程",
+        "真实Linux用户权限隔离（sudo切换用户）",
+        "独立home目录（/mnt/bdap/<username>）",
+        "完全数据隔离（配置、会话、workspace）",
+        "按需进程管理（空闲5分钟回收）"
+      ]
+    },
+    "userModel": {
+      "identityType": "混合模式：应用层 + AD + Linux系统用户",
+      "totalUsers": 2000,
+      "concurrentUsers": "200-500",
+      "userLifecycle": "手动预配置（管理员管理）",
+      "homeDirectory": "/mnt/bdap/<username>",
+      "isolationLevel": "完全隔离"
+    },
+    "processManagement": {
+      "strategy": "按需启动",
+      "idleTimeout": "5分钟",
+      "keepAlive": "前端心跳保活机制",
+      "coldStartAcceptance": "可接受首次请求的启动延迟"
+    },
+    "securityModel": {
+      "sudoPermission": "全局NOPASSWD权限",
+      "riskAcceptance": "信任服务代码安全性",
+      "serviceUser": "cui-service（或类似名称）",
+      "targetUsers": "所有真实Linux用户"
+    },
+    "dataMigration": {
+      "required": false,
+      "historicalData": "无需保留",
+      "strategy": "全新启动"
+    }
+  },
+  "goals": {
+    "P0": [
+      {
+        "id": "P0-1",
+        "description": "实现用户认证与会话管理",
+        "acceptanceCriteria": [
+          "支持AD用户认证",
+          "JWT token管理",
+          "用户会话与Linux用户映射"
+        ]
+      },
+      {
+        "id": "P0-2",
+        "description": "实现进程隔离与权限切换",
+        "acceptanceCriteria": [
+          "sudo安全配置（NOPASSWD）",
+          "进程以真实用户权限运行",
+          "进程隔离验证（用户A无法访问用户B的进程）"
+        ]
+      },
+      {
+        "id": "P0-3",
+        "description": "实现目录权限隔离",
+        "acceptanceCriteria": [
+          "每用户独立home目录（/mnt/bdap/<username>）",
+          "Claude配置文件隔离（~/.config/claude）",
+          "会话历史隔离（~/.local/share/claude）",
+          "workspace文件隔离"
+        ]
+      },
+      {
+        "id": "P0-4",
+        "description": "实现按需进程管理",
+        "acceptanceCriteria": [
+          "用户请求时自动启动进程",
+          "空闲5分钟自动回收进程",
+          "进程状态跟踪（idle/active）",
+          "资源泄漏防护"
+        ]
+      }
+    ],
+    "P1": [
+      {
+        "id": "P1-1",
+        "description": "实现前端心跳保活机制",
+        "acceptanceCriteria": [
+          "前端定时发送心跳请求（例如每30秒）",
+          "后端更新进程活跃时间戳",
+          "防止用户无交互时的假空闲"
+        ]
+      },
+      {
+        "id": "P1-2",
+        "description": "性能监控与资源限制",
+        "acceptanceCriteria": [
+          "进程数量监控",
+          "单用户资源配额（CPU/内存）",
+          "异常进程清理"
+        ]
+      },
+      {
+        "id": "P1-3",
+        "description": "日志审计与安全",
+        "acceptanceCriteria": [
+          "用户操作日志记录",
+          "sudo切换审计",
+          "异常访问告警"
+        ]
+      }
+    ],
+    "P2": [
+      {
+        "id": "P2-1",
+        "description": "管理员控制台",
+        "acceptanceCriteria": [
+          "用户管理界面",
+          "进程状态查看",
+          "手动清理功能"
+        ]
+      },
+      {
+        "id": "P2-2",
+        "description": "优雅降级与容错",
+        "acceptanceCriteria": [
+          "进程启动失败时的用户提示",
+          "资源耗尽时的限流策略",
+          "部分用户不可用不影响其他用户"
+        ]
+      }
+    ]
+  },
+  "technicalConstraints": [
+    "必须使用sudo切换用户（无容器方案）",
+    "必须兼容现有Claude CLI",
+    "不能修改用户home目录结构（由管理员管理）",
+    "需要兼容现有的认证中间件"
+  ],
+  "risks": [
+    {
+      "id": "RISK-1",
+      "description": "sudo权限过大导致安全风险",
+      "severity": "高",
+      "mitigation": "代码安全审查、最小权限原则、审计日志",
+      "acceptance": "已接受风险，信任服务代码"
+    },
+    {
+      "id": "RISK-2",
+      "description": "进程回收策略不当导致用户体验问题",
+      "severity": "中",
+      "mitigation": "前端心跳保活、合理的超时时间（5分钟）、冷启动优化"
+    },
+    {
+      "id": "RISK-3",
+      "description": "200-500并发下的资源压力",
+      "severity": "中",
+      "mitigation": "按需启动降低常驻进程数、资源配额限制、监控告警"
+    },
+    {
+      "id": "RISK-4",
+      "description": "用户身份映射错误导致数据泄露",
+      "severity": "高",
+      "mitigation": "严格的认证校验、用户会话与Linux用户绑定、目录权限验证"
+    }
+  ],
+  "verificationStrategy": {
+    "unitTests": [
+      "用户认证流程测试",
+      "sudo切换用户测试",
+      "进程生命周期管理测试",
+      "目录权限隔离测试"
+    ],
+    "integrationTests": [
+      "多用户并发测试（10+用户同时发起请求）",
+      "进程回收与重启测试",
+      "心跳保活机制测试",
+      "异常场景测试（进程崩溃、资源不足）"
+    ],
+    "securityTests": [
+      "权限隔离验证（用户A无法访问用户B的数据）",
+      "sudo审计日志验证",
+      "异常访问拦截测试"
+    ],
+    "performanceTests": [
+      "200并发压力测试",
+      "500并发极限测试",
+      "冷启动时间测试（<2秒目标）",
+      "长时间运行稳定性测试（24小时）"
+    ]
+  },
+  "openQuestions": [],
+  "assumptions": [
+    "Linux用户已由管理员预创建完成",
+    "Claude CLI已在每个用户的环境中配置完成",
+    "AD认证服务稳定可用",
+    "用户可接受首次请求的冷启动延迟（<2秒）",
+    "前端愿意配合实现心跳保活机制"
+  ]
+}
