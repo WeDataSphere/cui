@@ -105,5 +105,3 @@ jspm_packages/
 
 # Git worktrees
 cc-worktrees/
-# code agent
-.claude/
